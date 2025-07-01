@@ -46,4 +46,180 @@ export function registerComponentTools(server: McpServer): void {
       }
     }
   );
+
+  // Get Component Properties Tool
+  server.tool(
+    "get_component_properties",
+    "Get the available variants and properties for a component",
+    {
+      componentKey: z.string().describe("Key of the component to analyze"),
+    },
+    async ({ componentKey }) => {
+      try {
+        const result = await sendCommandToFigma("get_component_properties", {
+          componentKey,
+        }, 15000);
+        const typedResult = result as any;
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(typedResult, null, 2),
+            }
+          ]
+        }
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error getting component properties: ${error instanceof Error ? error.message : String(error)}`,
+            },
+          ],
+        };
+      }
+    }
+  );
+
+  // Set Component Variant Tool
+  server.tool(
+    "set_component_variant",
+    "Change the variant of a component instance",
+    {
+      nodeId: z.string().describe("ID of the component instance to modify"),
+      variants: z.record(z.string()).describe("Object mapping variant property names to their desired values (e.g., {size: 'large', state: 'hover'})"),
+    },
+    async ({ nodeId, variants }) => {
+      try {
+        const result = await sendCommandToFigma("set_component_variant", {
+          nodeId,
+          variants,
+        }, 10000);
+        const typedResult = result as any;
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(typedResult),
+            }
+          ]
+        }
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error setting component variant: ${error instanceof Error ? error.message : String(error)}`,
+            },
+          ],
+        };
+      }
+    }
+  );
+
+  // Get Component Variant Tool
+  server.tool(
+    "get_component_variant",
+    "Get the current variant of a component instance",
+    {
+      nodeId: z.string().describe("ID of the component instance"),
+    },
+    async ({ nodeId }) => {
+      try {
+        const result = await sendCommandToFigma("get_component_variant", {
+          nodeId,
+        }, 5000);
+        const typedResult = result as any;
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(typedResult, null, 2),
+            }
+          ]
+        }
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error getting component variant: ${error instanceof Error ? error.message : String(error)}`,
+            },
+          ],
+        };
+      }
+    }
+  );
+
+  // Set Component Property Tool
+  server.tool(
+    "set_component_property",
+    "Set a property value on a component instance (e.g., text content, boolean properties)",
+    {
+      nodeId: z.string().describe("ID of the component instance"),
+      propertyName: z.string().describe("Name of the property to set"),
+      value: z.union([z.string(), z.number(), z.boolean()]).describe("Value to set for the property"),
+    },
+    async ({ nodeId, propertyName, value }) => {
+      try {
+        const result = await sendCommandToFigma("set_component_property", {
+          nodeId,
+          propertyName,
+          value,
+        }, 5000);
+        const typedResult = result as any;
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(typedResult),
+            }
+          ]
+        }
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error setting component property: ${error instanceof Error ? error.message : String(error)}`,
+            },
+          ],
+        };
+      }
+    }
+  );
+
+  // Get Component Properties for Instance Tool
+  server.tool(
+    "get_component_properties_for_instance",
+    "Get all current properties and overrides for a component instance",
+    {
+      nodeId: z.string().describe("ID of the component instance"),
+    },
+    async ({ nodeId }) => {
+      try {
+        const result = await sendCommandToFigma("get_component_properties_for_instance", {
+          nodeId,
+        }, 5000);
+        const typedResult = result as any;
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(typedResult, null, 2),
+            }
+          ]
+        }
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error getting component properties for instance: ${error instanceof Error ? error.message : String(error)}`,
+            },
+          ],
+        };
+      }
+    }
+  );
 }
