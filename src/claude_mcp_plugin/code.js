@@ -817,31 +817,40 @@ async function createComponentInstance(params) {
   const startTime = Date.now();
 
   try {
-    // First, try to find the component in the current document
-    console.log(`[COMPONENT_INSTANCE] Searching for component in current document...`);
+    // CRITICAL FIX: Import component directly using the published component key
+    // According to Figma docs, figma.importComponentByKeyAsync is the correct method
+    // for published components, and componentKey refers to published component keys
+    
+    console.log(`[COMPONENT_INSTANCE] Importing component directly using figma.importComponentByKeyAsync...`);
+    
     let component = null;
-    
-    // Search for component by key in current document
-    const allComponents = figma.root.findAll(node => 
-      node.type === 'COMPONENT' && ('key' in node) && node.key === componentKey
-    );
-    
-    if (allComponents.length > 0) {
-      component = allComponents[0];
-      console.log(`[COMPONENT_INSTANCE] Found component in current document: ${component.name}`);
-    } else {
-      // Try to import the component from external library
-      console.log(`[COMPONENT_INSTANCE] Component not found locally, attempting import...`);
-      try {
-        component = await figma.importComponentByKeyAsync(componentKey);
-        console.log(`[COMPONENT_INSTANCE] Successfully imported component: ${component.name}`);
-      } catch (importError) {
-        console.error(`[COMPONENT_INSTANCE] Import failed:`, importError.message);
-        
-        // Fallback: look for existing instances to clone from
-        console.log(`[COMPONENT_INSTANCE] Attempting clone fallback...`);
+    try {
+      // This is the correct API for published components
+      component = await figma.importComponentByKeyAsync(componentKey);
+      console.log(`[COMPONENT_INSTANCE] Successfully imported component: ${component.name}`);
+      console.log(`[COMPONENT_INSTANCE] Component details: type=${component.type}, id=${component.id}, remote=${component.remote}`);
+      
+    } catch (importError) {
+      console.error(`[COMPONENT_INSTANCE] Direct import failed:`, importError.message);
+      console.error(`[COMPONENT_INSTANCE] Error type:`, importError.constructor.name);
+      
+      // Fallback 1: Search local document for matching component by key
+      console.log(`[COMPONENT_INSTANCE] Attempting local component search fallback...`);
+      const localComponents = figma.root.findAll(node => 
+        node.type === 'COMPONENT' && node.key === componentKey
+      );
+      
+      if (localComponents.length > 0) {
+        component = localComponents[0];
+        console.log(`[COMPONENT_INSTANCE] Found local component: ${component.name}`);
+      } else {
+        // Fallback 2: Search for existing instances with this componentId/key and clone
+        console.log(`[COMPONENT_INSTANCE] Attempting instance clone fallback...`);
         const existingInstances = figma.root.findAll(node => 
-          node.type === 'INSTANCE' && node.componentId === componentKey
+          node.type === 'INSTANCE' && (
+            node.componentId === componentKey || 
+            (node.componentProperties && Object.keys(node.componentProperties).length > 0)
+          )
         );
         
         if (existingInstances.length > 0) {
@@ -850,8 +859,8 @@ async function createComponentInstance(params) {
           const clonedNode = sourceInstance.clone();
           clonedNode.x = x;
           clonedNode.y = y;
-          figma.currentPage.appendChild(clonedNode);
           
+          // The clone is already added to the page by default
           const totalTime = Date.now() - startTime;
           console.log(`[COMPONENT_INSTANCE] Clone fallback successful: ${clonedNode.id} (${totalTime}ms)`);
           
@@ -869,24 +878,30 @@ async function createComponentInstance(params) {
           };
         }
         
-        throw new Error(`Component not found and no existing instances available for cloning. Component key: ${componentKey}`);
+        // If all fallbacks fail, provide detailed error
+        throw new Error(`Component "${componentKey}" not found. Tried: import, local search, and instance cloning. Ensure the component is published and accessible.`);
       }
     }
 
     if (!component || component.type !== 'COMPONENT') {
-      throw new Error(`Invalid component found for key: ${componentKey}`);
+      throw new Error(`Invalid component found for key: ${componentKey}. Expected COMPONENT, got: ${component ? component.type : 'null'}`);
     }
 
     // Create instance using the correct Figma API
     console.log(`[COMPONENT_INSTANCE] Creating instance using ComponentNode.createInstance()...`);
     const instance = component.createInstance();
     
+    console.log(`[COMPONENT_INSTANCE] Instance created, setting position...`);
     // Set position
     instance.x = x;
     instance.y = y;
     
-    // Add to current page
-    figma.currentPage.appendChild(instance);
+    // Note: createInstance() automatically adds to figma.currentPage according to docs
+    // But let's ensure it's on the current page
+    if (instance.parent !== figma.currentPage) {
+      console.log(`[COMPONENT_INSTANCE] Moving instance to current page...`);
+      figma.currentPage.appendChild(instance);
+    }
     
     const totalTime = Date.now() - startTime;
     console.log(`[COMPONENT_INSTANCE] Successfully created instance: ${instance.id} (${totalTime}ms total)`);
@@ -907,16 +922,17 @@ async function createComponentInstance(params) {
   } catch (error) {
     const elapsed = Date.now() - startTime;
     console.error(`[COMPONENT_INSTANCE] Operation failed after ${elapsed}ms:`, error.message);
+    console.error(`[COMPONENT_INSTANCE] Full error:`, error);
 
-    // Enhanced error handling
-    if (error.message.includes("not found")) {
-      throw new Error(`Component not found: ${componentKey}. Verify the component exists and is accessible.`);
+    // Enhanced error handling with more context
+    if (error.message.includes("not found") || error.message.includes("Not found")) {
+      throw new Error(`Component key "${componentKey}" not found. Ensure the component is published in a team library and you have access. Original error: ${error.message}`);
     } else if (error.message.includes("permission") || error.message.includes("Permission")) {
-      throw new Error(`Permission denied accessing component: ${componentKey}. Check library access permissions.`);
+      throw new Error(`Permission denied accessing component "${componentKey}". Check library access permissions. Original error: ${error.message}`);
     } else if (error.message.includes("network") || error.message.includes("Network")) {
-      throw new Error(`Network error importing component: ${componentKey}. Check your internet connection and try again.`);
+      throw new Error(`Network error importing component "${componentKey}". Check internet connection. Original error: ${error.message}`);
     } else {
-      throw new Error(`Failed to create component instance: ${error.message}. Component key: ${componentKey}`);
+      throw new Error(`Failed to create component instance for key "${componentKey}": ${error.message}`);
     }
   }
 }
