@@ -1022,7 +1022,7 @@ async function getComponentProperties(params) {
 
       // Get default variant (current component's properties)
       if (component.variantProperties) {
-        result.defaultVariant = { ...component.variantProperties };
+        result.defaultVariant = Object.assign({}, component.variantProperties);
       }
     }
 
@@ -1246,7 +1246,7 @@ async function getComponentPropertiesForInstance(params) {
 
     // Get current component properties
     if (node.componentProperties) {
-      result.properties = { ...node.componentProperties };
+      result.properties = Object.assign({}, node.componentProperties);
     }
 
     // Get overrides information
