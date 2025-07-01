@@ -19,11 +19,12 @@ export function registerComponentTools(server: McpServer): void {
     },
     async ({ componentKey, x, y }) => {
       try {
+        // Use 20-second timeout to accommodate the 15-second plugin timeout plus buffer
         const result = await sendCommandToFigma("create_component_instance", {
           componentKey,
           x,
           y,
-        });
+        }, 20000);
         const typedResult = result as any;
         return {
           content: [

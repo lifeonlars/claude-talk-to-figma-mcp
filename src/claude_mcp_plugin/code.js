@@ -803,76 +803,96 @@ async function createComponentInstance(params) {
     throw new Error('Missing componentKey parameter');
   }
 
+  console.log(`[COMPONENT_INSTANCE] Starting creation for key: ${componentKey}`);
+  const startTime = Date.now();
+
   try {
-    // Set up a manual timeout to detect long operations
+    // Create timeout promise with detailed error message
     let timeoutId;
     const timeoutPromise = new Promise((_, reject) => {
       timeoutId = setTimeout(() => {
-        reject(
-          new Error(
-            'Timeout while creating component instance (10s). The component may be too complex or unavailable.'
-          )
-        );
-      }, 10000); // 10 seconds timeout
+        const elapsed = Date.now() - startTime;
+        console.error(`[COMPONENT_INSTANCE] Timeout after ${elapsed}ms for key: ${componentKey}`);
+        reject(new Error(`Component instance creation timed out after 15 seconds. Component key: ${componentKey}`));
+      }, 15000); // Increased to 15 seconds for better reliability
     });
 
-    console.log(`Starting component import for key: ${componentKey}...`);
+    // Main operation with chunking to prevent blocking
+    const createPromise = (async () => {
+      console.log(`[COMPONENT_INSTANCE] Attempting to import component: ${componentKey}`);
+      
+      // Yield control to main thread before starting import  
+      await new Promise(resolve => setTimeout(resolve, 0));
+      
+      try {
+        // Import component with detailed progress logging
+        const component = await figma.importComponentByKeyAsync(componentKey);
+        
+        const importTime = Date.now() - startTime;
+        console.log(`[COMPONENT_INSTANCE] Successfully imported component: ${component.name} (${importTime}ms)`);
+        
+        // Yield control again before instance creation
+        await new Promise(resolve => setTimeout(resolve, 1));
+        
+        // Create instance
+        console.log(`[COMPONENT_INSTANCE] Creating instance...`);
+        const instance = component.createInstance();
+        
+        // Set position
+        instance.x = x;
+        instance.y = y;
+        
+        // Add to current page
+        figma.currentPage.appendChild(instance);
+        
+        const totalTime = Date.now() - startTime;
+        console.log(`[COMPONENT_INSTANCE] Successfully created instance: ${instance.id} (${totalTime}ms total)`);
+        
+        return {
+          id: instance.id,
+          name: instance.name,
+          x: instance.x,
+          y: instance.y,
+          width: instance.width,
+          height: instance.height,
+          componentId: instance.componentId,
+          componentName: component.name,
+          creationTime: totalTime
+        };
+        
+      } catch (importError) {
+        const elapsed = Date.now() - startTime;
+        console.error(`[COMPONENT_INSTANCE] Import failed after ${elapsed}ms:`, importError);
+        throw importError;
+      }
+    })();
 
-    // Execute the import with a timeout
-    const importPromise = figma.importComponentByKeyAsync(componentKey);
-
-    // Use Promise.race to implement the timeout
-    const component = await Promise.race([importPromise, timeoutPromise]).finally(() => {
-      clearTimeout(timeoutId); // Clear the timeout to prevent memory leaks
-    });
-
-    // Add progress logging
-    console.log(`Component imported successfully, creating instance...`);
-
-    // Create instance and set properties in a separate try block to handle errors specifically from this step
-    try {
-      const instance = component.createInstance();
-      instance.x = x;
-      instance.y = y;
-
-      figma.currentPage.appendChild(instance);
-
-      console.log(`Component instance created and added to page successfully`);
-
-      return {
-        id: instance.id,
-        name: instance.name,
-        x: instance.x,
-        y: instance.y,
-        width: instance.width,
-        height: instance.height,
-        componentId: instance.componentId,
-      };
-    } catch (instanceError) {
-      console.error(`Error creating component instance: ${instanceError.message}`);
-      throw new Error(`Error creating component instance: ${instanceError.message}`);
-    }
+    // Race between operation and timeout
+    const result = await Promise.race([createPromise, timeoutPromise]);
+    
+    // Clear timeout if operation completed successfully
+    clearTimeout(timeoutId);
+    
+    return result;
+    
   } catch (error) {
-    console.error(
-      `Detailed error creating component instance: ${error.message || 'Unknown error'}`
-    );
-    console.error(`Stack trace: ${error.stack || 'Not available'}`);
+    const elapsed = Date.now() - startTime;
+    console.error(`[COMPONENT_INSTANCE] Operation failed after ${elapsed}ms:`, error.message);
+    console.error(`[COMPONENT_INSTANCE] Stack trace:`, error.stack || 'Not available');
 
-    // Provide more helpful error messages for common failure scenarios
-    if (error.message.includes('timeout') || error.message.includes('Timeout')) {
-      throw new Error(
-        `The component import timed out after 10 seconds. This usually happens with complex remote components or network issues. Try again later or use a simpler component.`
-      );
-    } else if (error.message.includes('not found') || error.message.includes('Not found')) {
-      throw new Error(
-        `Component with key "${componentKey}" not found. Make sure the component exists and is accessible in your document or team libraries.`
-      );
-    } else if (error.message.includes('permission') || error.message.includes('Permission')) {
-      throw new Error(
-        `You don't have permission to use this component. Make sure you have access to the team library containing this component.`
-      );
+    // Enhanced error handling with specific error types
+    if (error.message.includes("timeout") || error.message.includes("timed out")) {
+      throw new Error(`Component import timed out after ${elapsed}ms. This usually happens with complex remote components or network issues. Component key: ${componentKey}`);
+    } else if (error.message.includes("not found") || error.message.includes("Not found")) {
+      throw new Error(`Component not found: ${componentKey}. Verify the component exists and is accessible.`);
+    } else if (error.message.includes("permission") || error.message.includes("Permission")) {
+      throw new Error(`Permission denied accessing component: ${componentKey}. Check library access permissions.`);
+    } else if (error.message.includes("network") || error.message.includes("Network")) {
+      throw new Error(`Network error importing component: ${componentKey}. Check your internet connection and try again.`);
+    } else if (error.message.includes("quota") || error.message.includes("Quota")) {
+      throw new Error(`API quota exceeded while importing component: ${componentKey}. Please wait and try again.`);
     } else {
-      throw new Error(`Error creating component instance: ${error.message}`);
+      throw new Error(`Failed to create component instance: ${error.message}. Component key: ${componentKey}`);
     }
   }
 }
