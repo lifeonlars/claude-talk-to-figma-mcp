@@ -222,4 +222,40 @@ export function registerComponentTools(server: McpServer): void {
       }
     }
   );
+
+  // Search Components Tool
+  server.tool(
+    "search_components",
+    "Search for components by name in the current document and imported libraries",
+    {
+      searchTerm: z.string().describe("Term to search for in component names"),
+      limit: z.number().optional().describe("Maximum number of results to return (default: 50)"),
+    },
+    async ({ searchTerm, limit }) => {
+      try {
+        const result = await sendCommandToFigma("search_components", {
+          searchTerm,
+          limit,
+        }, 10000);
+        const typedResult = result as any;
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(typedResult, null, 2),
+            }
+          ]
+        }
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error searching components: ${error instanceof Error ? error.message : String(error)}`,
+            },
+          ],
+        };
+      }
+    }
+  );
 }

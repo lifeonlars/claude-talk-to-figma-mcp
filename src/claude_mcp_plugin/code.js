@@ -149,6 +149,8 @@ async function handleCommand(command, params) {
       return await setComponentProperty(params);
     case 'get_component_properties_for_instance':
       return await getComponentPropertiesForInstance(params);
+    case 'search_components':
+      return await searchComponents(params);
     case 'export_node_as_image':
       return await exportNodeAsImage(params);
     case 'set_corner_radius':
@@ -1334,6 +1336,125 @@ async function getComponentPropertiesForInstance(params) {
   } catch (error) {
     console.error(`[COMPONENT_PROPS_INST] Error getting instance properties:`, error);
     throw new Error(`Failed to get component properties for instance: ${error.message}. Node: ${nodeId}`);
+  }
+}
+
+async function searchComponents(params) {
+  const { searchTerm, limit = 50 } = params || {};
+
+  if (!searchTerm) {
+    throw new Error('Missing searchTerm parameter');
+  }
+
+  console.log(`[SEARCH_COMPONENTS] Searching for components matching: "${searchTerm}"`);
+
+  try {
+    // Search efficiently - start with current page, then expand if needed
+    console.log(`[SEARCH_COMPONENTS] Searching current page first...`);
+    let foundComponents = [];
+    
+    // Search current page components
+    const currentPageComponents = figma.currentPage.findAll(node => 
+      node.type === 'COMPONENT' && 
+      node.name.toLowerCase().includes(searchTerm.toLowerCase())
+    );
+    
+    // Search current page instances to find imported components
+    const currentPageInstances = figma.currentPage.findAll(node => 
+      node.type === 'INSTANCE' && 
+      node.name.toLowerCase().includes(searchTerm.toLowerCase())
+    );
+    
+    // Add current page results
+    currentPageComponents.forEach(comp => {
+      if (comp.key) {
+        foundComponents.push({
+          key: comp.key,
+          id: comp.id,
+          name: comp.name,
+          description: comp.description || '',
+          remote: comp.remote || false,
+          location: 'current_page'
+        });
+      }
+    });
+    
+    // Add component info from instances
+    currentPageInstances.forEach(instance => {
+      try {
+        const mainComponent = figma.getNodeById(instance.componentId);
+        if (mainComponent && mainComponent.type === 'COMPONENT' && mainComponent.key) {
+          const existing = foundComponents.find(c => c.key === mainComponent.key);
+          if (!existing) {
+            foundComponents.push({
+              key: mainComponent.key,
+              id: mainComponent.id,
+              name: mainComponent.name,
+              description: mainComponent.description || '',
+              remote: mainComponent.remote || false,
+              location: 'imported',
+              instancesFound: 1
+            });
+          }
+        }
+      } catch (error) {
+        // Skip unresolvable components
+      }
+    });
+    
+    // If we haven't found enough results and limit allows, search other pages
+    if (foundComponents.length < Math.min(limit, 20)) {
+      console.log(`[SEARCH_COMPONENTS] Expanding search to all pages...`);
+      await figma.loadAllPagesAsync();
+      
+      // Search all other pages
+      const allComponents = figma.root.findAll(node => 
+        node.type === 'COMPONENT' && 
+        node.name.toLowerCase().includes(searchTerm.toLowerCase()) &&
+        !foundComponents.some(fc => fc.id === node.id) // Avoid duplicates
+      );
+      
+      allComponents.forEach(comp => {
+        if (comp.key && foundComponents.length < limit) {
+          foundComponents.push({
+            key: comp.key,
+            id: comp.id,
+            name: comp.name,
+            description: comp.description || '',
+            remote: comp.remote || false,
+            location: 'other_page'
+          });
+        }
+      });
+    }
+    
+    // Sort by relevance (exact matches first, then alphabetical)
+    foundComponents.sort((a, b) => {
+      const aExact = a.name.toLowerCase() === searchTerm.toLowerCase();
+      const bExact = b.name.toLowerCase() === searchTerm.toLowerCase();
+      
+      if (aExact && !bExact) return -1;
+      if (bExact && !aExact) return 1;
+      
+      return a.name.localeCompare(b.name);
+    });
+    
+    // Limit results
+    const limitedResults = foundComponents.slice(0, limit);
+    
+    console.log(`[SEARCH_COMPONENTS] Found ${limitedResults.length} components matching "${searchTerm}"`);
+    
+    return {
+      searchTerm: searchTerm,
+      count: limitedResults.length,
+      totalMatches: foundComponents.length,
+      limited: foundComponents.length > limit,
+      components: limitedResults
+    };
+    
+  } catch (error) {
+    console.error(`[SEARCH_COMPONENTS] Error searching components:`, error);
+    throw new Error(`Failed to search components: ${error.message}. Search term: ${searchTerm}`);
   }
 }
 
@@ -2915,56 +3036,86 @@ async function loadFontAsyncWrapper(params) {
 
 async function getRemoteComponents() {
   try {
-    // Check if figma.teamLibrary is available
-    if (!figma.teamLibrary) {
-      console.error('Error: figma.teamLibrary API is not available');
-      throw new Error('The figma.teamLibrary API is not available in this context');
-    }
-
-    // Check if figma.teamLibrary.getAvailableComponentsAsync exists
-    if (!figma.teamLibrary.getAvailableComponentsAsync) {
-      console.error('Error: figma.teamLibrary.getAvailableComponentsAsync is not available');
-      throw new Error('The getAvailableComponentsAsync method is not available');
-    }
-
-    console.log('Starting remote components retrieval...');
-
-    // Set up a manual timeout to detect deadlocks
-    let timeoutId;
-    const timeoutPromise = new Promise((_, reject) => {
-      timeoutId = setTimeout(() => {
-        reject(new Error('Internal timeout while retrieving remote components (15s)'));
-      }, 15000); // 15 seconds internal timeout
+    console.log('[REMOTE_COMPONENTS] Starting component discovery...');
+    
+    // CRITICAL FIX: figma.teamLibrary.getAvailableComponentsAsync() doesn't exist!
+    // Instead, we need to get components from the current document
+    // and any imported components that are already in the document
+    
+    // Load all pages to ensure we can search the entire document
+    console.log('[REMOTE_COMPONENTS] Loading all pages...');
+    await figma.loadAllPagesAsync();
+    
+    console.log('[REMOTE_COMPONENTS] Searching all pages for components and component instances...');
+    
+    // Find all components in the current document
+    const localComponents = figma.root.findAll(node => node.type === 'COMPONENT');
+    
+    // Find all component instances to discover imported components
+    const instances = figma.root.findAll(node => node.type === 'INSTANCE');
+    
+    console.log(`[REMOTE_COMPONENTS] Found ${localComponents.length} local components and ${instances.length} instances`);
+    
+    // Create a map to track unique components
+    const componentMap = new Map();
+    
+    // Add local components
+    localComponents.forEach(component => {
+      if (component.key) {
+        componentMap.set(component.key, {
+          key: component.key,
+          id: component.id,
+          name: component.name,
+          description: component.description || '',
+          remote: component.remote || false,
+          type: 'component',
+          parent: component.parent ? component.parent.name : null
+        });
+      }
     });
-
-    // Execute the request with a manual timeout
-    const fetchPromise = figma.teamLibrary.getAvailableComponentsAsync();
-
-    // Use Promise.race to implement the timeout
-    const teamComponents = await Promise.race([fetchPromise, timeoutPromise]).finally(() => {
-      clearTimeout(timeoutId); // Clear the timeout
+    
+    // Add components discovered from instances (imported components)
+    const uniqueComponentIds = new Set();
+    instances.forEach(instance => {
+      if (instance.componentId && !uniqueComponentIds.has(instance.componentId)) {
+        uniqueComponentIds.add(instance.componentId);
+        
+        // Try to get the main component
+        try {
+          const mainComponent = figma.getNodeById(instance.componentId);
+          if (mainComponent && mainComponent.type === 'COMPONENT' && mainComponent.key) {
+            componentMap.set(mainComponent.key, {
+              key: mainComponent.key,
+              id: mainComponent.id,
+              name: mainComponent.name,
+              description: mainComponent.description || '',
+              remote: mainComponent.remote || false,
+              type: 'imported_component',
+              instanceCount: instances.filter(inst => inst.componentId === instance.componentId).length
+            });
+          }
+        } catch (error) {
+          console.log(`[REMOTE_COMPONENTS] Could not resolve component for instance ${instance.id}: ${error.message}`);
+        }
+      }
     });
-
-    console.log(`Retrieved ${teamComponents.length} remote components`);
-
+    
+    const allComponents = Array.from(componentMap.values());
+    
+    console.log(`[REMOTE_COMPONENTS] Total unique components found: ${allComponents.length}`);
+    
     return {
       success: true,
-      count: teamComponents.length,
-      components: teamComponents.map((component) => ({
-        key: component.key,
-        name: component.name,
-        description: component.description || '',
-        libraryName: component.libraryName,
-      })),
+      source: 'document_scan',
+      count: allComponents.length,
+      localComponents: localComponents.length,
+      importedComponents: allComponents.filter(c => c.type === 'imported_component').length,
+      components: allComponents.sort((a, b) => a.name.localeCompare(b.name))
     };
+    
   } catch (error) {
-    console.error(
-      `Detailed error retrieving remote components: ${error.message || 'Unknown error'}`
-    );
-    console.error(`Stack trace: ${error.stack || 'Not available'}`);
-
-    // Instead of returning an error object, throw an exception with the error message
-    throw new Error(`Error retrieving remote components: ${error.message}`);
+    console.error('[REMOTE_COMPONENTS] Error getting components:', error);
+    throw new Error(`Error getting components: ${error.message}`);
   }
 }
 
