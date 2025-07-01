@@ -817,149 +817,104 @@ async function createComponentInstance(params) {
   const startTime = Date.now();
 
   try {
-    // Create timeout promise with detailed error message
-    let timeoutId;
-    const timeoutPromise = new Promise((_, reject) => {
-      timeoutId = setTimeout(() => {
-        const elapsed = Date.now() - startTime;
-        console.error(`[COMPONENT_INSTANCE] Timeout after ${elapsed}ms for key: ${componentKey}`);
-        reject(new Error(`Component instance creation timed out after 15 seconds. Component key: ${componentKey}`));
-      }, 15000); // Increased to 15 seconds for better reliability
-    });
-
-    // Main operation with extensive debugging and fallback approach
-    const createPromise = (async () => {
-      console.log(`[COMPONENT_INSTANCE] Attempting to import component: ${componentKey}`);
-      console.log(`[COMPONENT_INSTANCE] Component key length: ${componentKey.length}`);
-      console.log(`[COMPONENT_INSTANCE] Component key format valid: ${/^[a-f0-9]{40}$/.test(componentKey)}`);
-      
-      // Yield control to main thread before starting import  
-      await new Promise(resolve => setTimeout(resolve, 0));
-      
+    // First, try to find the component in the current document
+    console.log(`[COMPONENT_INSTANCE] Searching for component in current document...`);
+    let component = null;
+    
+    // Search for component by key in current document
+    const allComponents = figma.root.findAll(node => 
+      node.type === 'COMPONENT' && ('key' in node) && node.key === componentKey
+    );
+    
+    if (allComponents.length > 0) {
+      component = allComponents[0];
+      console.log(`[COMPONENT_INSTANCE] Found component in current document: ${component.name}`);
+    } else {
+      // Try to import the component from external library
+      console.log(`[COMPONENT_INSTANCE] Component not found locally, attempting import...`);
       try {
-        // Add more detailed pre-import logging
-        console.log(`[COMPONENT_INSTANCE] Starting figma.importComponentByKeyAsync...`);
-        const importStartTime = Date.now();
+        component = await figma.importComponentByKeyAsync(componentKey);
+        console.log(`[COMPONENT_INSTANCE] Successfully imported component: ${component.name}`);
+      } catch (importError) {
+        console.error(`[COMPONENT_INSTANCE] Import failed:`, importError.message);
         
-        // Try with additional error context
-        let component;
-        try {
-          component = await figma.importComponentByKeyAsync(componentKey);
-        } catch (directImportError) {
-          const importAttemptTime = Date.now() - importStartTime;
-          console.error(`[COMPONENT_INSTANCE] Direct import failed after ${importAttemptTime}ms:`, directImportError);
-          console.error(`[COMPONENT_INSTANCE] Error type:`, directImportError.constructor.name);
-          console.error(`[COMPONENT_INSTANCE] Error message:`, directImportError.message);
-          console.error(`[COMPONENT_INSTANCE] Error stack:`, directImportError.stack);
+        // Fallback: look for existing instances to clone from
+        console.log(`[COMPONENT_INSTANCE] Attempting clone fallback...`);
+        const existingInstances = figma.root.findAll(node => 
+          node.type === 'INSTANCE' && node.componentId === componentKey
+        );
+        
+        if (existingInstances.length > 0) {
+          console.log(`[COMPONENT_INSTANCE] Found existing instance to clone: ${existingInstances[0].id}`);
+          const sourceInstance = existingInstances[0];
+          const clonedNode = sourceInstance.clone();
+          clonedNode.x = x;
+          clonedNode.y = y;
+          figma.currentPage.appendChild(clonedNode);
           
-          // Try alternative approach: check if component exists in current document first
-          console.log(`[COMPONENT_INSTANCE] Attempting fallback approach...`);
+          const totalTime = Date.now() - startTime;
+          console.log(`[COMPONENT_INSTANCE] Clone fallback successful: ${clonedNode.id} (${totalTime}ms)`);
           
-          // Look for existing component instances to clone from
-          const allNodes = figma.root.findAll(node => 
-            node.type === 'INSTANCE' && node.componentId === componentKey
-          );
-          
-          if (allNodes.length > 0) {
-            console.log(`[COMPONENT_INSTANCE] Found existing instance to clone from: ${allNodes[0].id}`);
-            const sourceInstance = allNodes[0];
-            const clonedNode = sourceInstance.clone();
-            clonedNode.x = x;
-            clonedNode.y = y;
-            figma.currentPage.appendChild(clonedNode);
-            
-            const totalTime = Date.now() - startTime;
-            console.log(`[COMPONENT_INSTANCE] Successfully created via clone fallback: ${clonedNode.id} (${totalTime}ms total)`);
-            
-            return {
-              id: clonedNode.id,
-              name: clonedNode.name,
-              x: clonedNode.x,
-              y: clonedNode.y,
-              width: clonedNode.width,
-              height: clonedNode.height,
-              componentId: clonedNode.componentId,
-              componentName: sourceInstance.name,
-              creationTime: totalTime,
-              method: 'clone_fallback'
-            };
-          }
-          
-          // If no fallback possible, re-throw original error
-          throw directImportError;
+          return {
+            id: clonedNode.id,
+            name: clonedNode.name,
+            x: clonedNode.x,
+            y: clonedNode.y,
+            width: clonedNode.width,
+            height: clonedNode.height,
+            componentId: clonedNode.componentId,
+            componentName: sourceInstance.name,
+            creationTime: totalTime,
+            method: 'clone_fallback'
+          };
         }
         
-        const importTime = Date.now() - startTime;
-        console.log(`[COMPONENT_INSTANCE] Successfully imported component: ${component.name} (${importTime}ms)`);
-        console.log(`[COMPONENT_INSTANCE] Component type: ${component.type}`);
-        console.log(`[COMPONENT_INSTANCE] Component id: ${component.id}`);
-        
-        // Yield control again before instance creation
-        await new Promise(resolve => setTimeout(resolve, 1));
-        
-        // Create instance
-        console.log(`[COMPONENT_INSTANCE] Creating instance...`);
-        const instance = component.createInstance();
-        
-        // Set position
-        instance.x = x;
-        instance.y = y;
-        
-        // Add to current page
-        figma.currentPage.appendChild(instance);
-        
-        const totalTime = Date.now() - startTime;
-        console.log(`[COMPONENT_INSTANCE] Successfully created instance: ${instance.id} (${totalTime}ms total)`);
-        
-        return {
-          id: instance.id,
-          name: instance.name,
-          x: instance.x,
-          y: instance.y,
-          width: instance.width,
-          height: instance.height,
-          componentId: instance.componentId,
-          componentName: component.name,
-          creationTime: totalTime,
-          method: 'direct_import'
-        };
-        
-      } catch (importError) {
-        const elapsed = Date.now() - startTime;
-        console.error(`[COMPONENT_INSTANCE] Import failed after ${elapsed}ms:`, importError);
-        console.error(`[COMPONENT_INSTANCE] Error details:`, {
-          message: importError.message,
-          type: importError.constructor.name,
-          stack: importError.stack
-        });
-        throw importError;
+        throw new Error(`Component not found and no existing instances available for cloning. Component key: ${componentKey}`);
       }
-    })();
+    }
 
-    // Race between operation and timeout
-    const result = await Promise.race([createPromise, timeoutPromise]);
+    if (!component || component.type !== 'COMPONENT') {
+      throw new Error(`Invalid component found for key: ${componentKey}`);
+    }
+
+    // Create instance using the correct Figma API
+    console.log(`[COMPONENT_INSTANCE] Creating instance using ComponentNode.createInstance()...`);
+    const instance = component.createInstance();
     
-    // Clear timeout if operation completed successfully
-    clearTimeout(timeoutId);
+    // Set position
+    instance.x = x;
+    instance.y = y;
     
-    return result;
+    // Add to current page
+    figma.currentPage.appendChild(instance);
+    
+    const totalTime = Date.now() - startTime;
+    console.log(`[COMPONENT_INSTANCE] Successfully created instance: ${instance.id} (${totalTime}ms total)`);
+    
+    return {
+      id: instance.id,
+      name: instance.name,
+      x: instance.x,
+      y: instance.y,
+      width: instance.width,
+      height: instance.height,
+      componentId: instance.componentId,
+      componentName: component.name,
+      creationTime: totalTime,
+      method: 'direct_creation'
+    };
     
   } catch (error) {
     const elapsed = Date.now() - startTime;
     console.error(`[COMPONENT_INSTANCE] Operation failed after ${elapsed}ms:`, error.message);
-    console.error(`[COMPONENT_INSTANCE] Stack trace:`, error.stack || 'Not available');
 
-    // Enhanced error handling with specific error types
-    if (error.message.includes("timeout") || error.message.includes("timed out")) {
-      throw new Error(`Component import timed out after ${elapsed}ms. This usually happens with complex remote components or network issues. Component key: ${componentKey}`);
-    } else if (error.message.includes("not found") || error.message.includes("Not found")) {
+    // Enhanced error handling
+    if (error.message.includes("not found")) {
       throw new Error(`Component not found: ${componentKey}. Verify the component exists and is accessible.`);
     } else if (error.message.includes("permission") || error.message.includes("Permission")) {
       throw new Error(`Permission denied accessing component: ${componentKey}. Check library access permissions.`);
     } else if (error.message.includes("network") || error.message.includes("Network")) {
       throw new Error(`Network error importing component: ${componentKey}. Check your internet connection and try again.`);
-    } else if (error.message.includes("quota") || error.message.includes("Quota")) {
-      throw new Error(`API quota exceeded while importing component: ${componentKey}. Please wait and try again.`);
     } else {
       throw new Error(`Failed to create component instance: ${error.message}. Component key: ${componentKey}`);
     }
@@ -978,21 +933,60 @@ async function getComponentProperties(params) {
   console.log(`[COMPONENT_PROPS] Getting properties for component: ${componentKey}`);
 
   try {
-    // Import the component to analyze its properties
-    const component = await figma.importComponentByKeyAsync(componentKey);
-    console.log(`[COMPONENT_PROPS] Successfully imported component: ${component.name}`);
+    // First try to find component locally, then import if needed
+    let component = null;
+    
+    // Search for component by key in current document
+    const localComponents = figma.root.findAll(node => 
+      node.type === 'COMPONENT' && ('key' in node) && node.key === componentKey
+    );
+    
+    if (localComponents.length > 0) {
+      component = localComponents[0];
+      console.log(`[COMPONENT_PROPS] Found component locally: ${component.name}`);
+    } else {
+      // Import the component to analyze its properties
+      console.log(`[COMPONENT_PROPS] Importing component...`);
+      component = await figma.importComponentByKeyAsync(componentKey);
+      console.log(`[COMPONENT_PROPS] Successfully imported component: ${component.name}`);
+    }
 
-    // Analyze component properties and variants
+    // Analyze component properties and variants using proper API
     const result = {
       componentId: component.id,
       componentName: component.name,
       componentKey: componentKey,
       variants: {},
       properties: {},
-      defaultVariant: {}
+      defaultVariant: {},
+      propertyDefinitions: {}
     };
 
-    // Check if this is a component set (has variants)
+    // Get component property definitions (the correct API)
+    if (component.componentPropertyDefinitions) {
+      console.log(`[COMPONENT_PROPS] Found componentPropertyDefinitions`);
+      
+      Object.keys(component.componentPropertyDefinitions).forEach(propName => {
+        const propDef = component.componentPropertyDefinitions[propName];
+        result.propertyDefinitions[propName] = {
+          type: propDef.type,
+          defaultValue: propDef.defaultValue,
+          variantOptions: propDef.variantOptions || []
+        };
+        
+        // Separate VARIANT type properties
+        if (propDef.type === 'VARIANT') {
+          result.variants[propName] = propDef.variantOptions || [];
+        } else {
+          result.properties[propName] = {
+            type: propDef.type,
+            defaultValue: propDef.defaultValue
+          };
+        }
+      });
+    }
+
+    // Check if this is a component set (has variants) - alternative method
     if (component.parent && component.parent.type === 'COMPONENT_SET') {
       const componentSet = component.parent;
       console.log(`[COMPONENT_PROPS] Component is part of variant set: ${componentSet.name}`);
@@ -1001,41 +995,31 @@ async function getComponentProperties(params) {
       const allVariants = componentSet.children.filter(child => child.type === 'COMPONENT');
       console.log(`[COMPONENT_PROPS] Found ${allVariants.length} variants`);
 
-      // Extract variant properties from all components
-      const variantProperties = new Map();
-      
-      allVariants.forEach(variant => {
-        if (variant.variantProperties) {
-          Object.keys(variant.variantProperties).forEach(propName => {
-            if (!variantProperties.has(propName)) {
-              variantProperties.set(propName, new Set());
-            }
-            variantProperties.get(propName).add(variant.variantProperties[propName]);
-          });
-        }
-      });
+      // Extract variant properties from all components as fallback
+      if (Object.keys(result.variants).length === 0) {
+        const variantProperties = new Map();
+        
+        allVariants.forEach(variant => {
+          if (variant.variantProperties) {
+            Object.keys(variant.variantProperties).forEach(propName => {
+              if (!variantProperties.has(propName)) {
+                variantProperties.set(propName, new Set());
+              }
+              variantProperties.get(propName).add(variant.variantProperties[propName]);
+            });
+          }
+        });
 
-      // Convert to result format
-      variantProperties.forEach((values, propName) => {
-        result.variants[propName] = Array.from(values).sort();
-      });
+        // Convert to result format
+        variantProperties.forEach((values, propName) => {
+          result.variants[propName] = Array.from(values).sort();
+        });
+      }
 
       // Get default variant (current component's properties)
       if (component.variantProperties) {
         result.defaultVariant = Object.assign({}, component.variantProperties);
       }
-    }
-
-    // Get component properties (text properties, boolean properties, etc.)
-    if (component.componentPropertyDefinitions) {
-      Object.keys(component.componentPropertyDefinitions).forEach(propName => {
-        const propDef = component.componentPropertyDefinitions[propName];
-        result.properties[propName] = {
-          type: propDef.type,
-          defaultValue: propDef.defaultValue,
-          variantOptions: propDef.variantOptions || []
-        };
-      });
     }
 
     console.log(`[COMPONENT_PROPS] Analysis complete:`, result);
@@ -1071,48 +1055,76 @@ async function setComponentVariant(params) {
       throw new Error(`Node ${nodeId} is not a component instance`);
     }
 
-    // Get the component set to find the matching variant
-    const component = await figma.getNodeByIdAsync(node.componentId);
-    if (!component || !component.parent || component.parent.type !== 'COMPONENT_SET') {
-      throw new Error(`Component does not have variants available`);
-    }
-
-    const componentSet = component.parent;
-    console.log(`[COMPONENT_VARIANT] Finding matching variant in set: ${componentSet.name}`);
-
-    // Find the component that matches the requested variants
-    const targetComponent = componentSet.children.find(child => {
-      if (child.type !== 'COMPONENT' || !child.variantProperties) {
-        return false;
+    // Use the correct Figma API: InstanceNode.setProperties()
+    console.log(`[COMPONENT_VARIANT] Using InstanceNode.setProperties() to set variants...`);
+    
+    try {
+      // setProperties expects an object with property names as keys
+      // For VARIANT properties, we pass them directly without suffixes
+      node.setProperties(variants);
+      
+      console.log(`[COMPONENT_VARIANT] Successfully set variants using setProperties`);
+      
+      // Get updated component info
+      const updatedComponent = await node.getMainComponentAsync();
+      
+      return {
+        nodeId: nodeId,
+        componentId: node.componentId,
+        appliedVariants: variants,
+        componentName: updatedComponent ? updatedComponent.name : node.name,
+        success: true
+      };
+      
+    } catch (setPropsError) {
+      console.error(`[COMPONENT_VARIANT] setProperties failed:`, setPropsError.message);
+      
+      // Fallback to swapComponent method for older API compatibility
+      console.log(`[COMPONENT_VARIANT] Attempting fallback with swapComponent...`);
+      
+      const component = await figma.getNodeByIdAsync(node.componentId);
+      if (!component || !component.parent || component.parent.type !== 'COMPONENT_SET') {
+        throw new Error(`Component does not have variants available and setProperties failed`);
       }
-      
-      // Check if all requested variants match
-      return Object.keys(variants).every(propName => 
-        child.variantProperties[propName] === variants[propName]
-      );
-    });
 
-    if (!targetComponent) {
-      const availableVariants = componentSet.children
-        .filter(child => child.type === 'COMPONENT' && child.variantProperties)
-        .map(child => child.variantProperties);
-      
-      throw new Error(`No matching variant found for ${JSON.stringify(variants)}. Available variants: ${JSON.stringify(availableVariants)}`);
+      const componentSet = component.parent;
+      console.log(`[COMPONENT_VARIANT] Finding matching variant in set: ${componentSet.name}`);
+
+      // Find the component that matches the requested variants
+      const targetComponent = componentSet.children.find(child => {
+        if (child.type !== 'COMPONENT' || !child.variantProperties) {
+          return false;
+        }
+        
+        // Check if all requested variants match
+        return Object.keys(variants).every(propName => 
+          child.variantProperties[propName] === variants[propName]
+        );
+      });
+
+      if (!targetComponent) {
+        const availableVariants = componentSet.children
+          .filter(child => child.type === 'COMPONENT' && child.variantProperties)
+          .map(child => child.variantProperties);
+        
+        throw new Error(`No matching variant found for ${JSON.stringify(variants)}. Available variants: ${JSON.stringify(availableVariants)}`);
+      }
+
+      console.log(`[COMPONENT_VARIANT] Found matching component: ${targetComponent.name}`);
+
+      // Swap the instance to the new component variant
+      node.swapComponent(targetComponent);
+
+      console.log(`[COMPONENT_VARIANT] Successfully swapped to variant using fallback method`);
+
+      return {
+        nodeId: nodeId,
+        newComponentId: targetComponent.id,
+        appliedVariants: targetComponent.variantProperties,
+        componentName: targetComponent.name,
+        method: 'swapComponent_fallback'
+      };
     }
-
-    console.log(`[COMPONENT_VARIANT] Found matching component: ${targetComponent.name}`);
-
-    // Swap the instance to the new component variant
-    node.swapComponent(targetComponent);
-
-    console.log(`[COMPONENT_VARIANT] Successfully swapped to variant`);
-
-    return {
-      nodeId: nodeId,
-      newComponentId: targetComponent.id,
-      appliedVariants: targetComponent.variantProperties,
-      componentName: targetComponent.name
-    };
 
   } catch (error) {
     console.error(`[COMPONENT_VARIANT] Error setting component variant:`, error);
@@ -1140,18 +1152,28 @@ async function getComponentVariant(params) {
       throw new Error(`Node ${nodeId} is not a component instance`);
     }
 
-    // Get the component to access variant properties
-    const component = await figma.getNodeByIdAsync(node.componentId);
+    // Use the correct async method to get main component
+    console.log(`[COMPONENT_VARIANT] Getting main component using getMainComponentAsync...`);
+    const component = await node.getMainComponentAsync();
+    
     if (!component) {
-      throw new Error(`Component not found for instance: ${node.componentId}`);
+      throw new Error(`Main component not found for instance: ${nodeId}`);
     }
+
+    // Get current variant properties from the component
+    const variants = component.variantProperties || {};
+    
+    // Also get component properties for the instance
+    const instanceProperties = node.componentProperties || {};
 
     const result = {
       nodeId: nodeId,
       componentId: node.componentId,
       componentName: component.name,
-      variants: component.variantProperties || {},
-      hasVariants: !!component.variantProperties
+      variants: variants,
+      properties: instanceProperties,
+      hasVariants: Object.keys(variants).length > 0,
+      hasProperties: Object.keys(instanceProperties).length > 0
     };
 
     console.log(`[COMPONENT_VARIANT] Retrieved variant info:`, result);
@@ -1187,27 +1209,60 @@ async function setComponentProperty(params) {
       throw new Error(`Node ${nodeId} is not a component instance`);
     }
 
-    // Set the component property
-    if (node.setProperties) {
-      const propertyUpdate = {};
-      propertyUpdate[propertyName] = value;
-      
-      node.setProperties(propertyUpdate);
-      console.log(`[COMPONENT_PROP] Successfully set property using setProperties`);
-    } else {
-      // Fallback for older API
-      console.log(`[COMPONENT_PROP] Using fallback property setting method`);
-      if (node.componentProperties && node.componentProperties[propertyName] !== undefined) {
-        node.componentProperties[propertyName] = value;
-      } else {
-        throw new Error(`Property "${propertyName}" not found on component instance`);
-      }
+    // Get the main component to understand property definitions
+    const component = await node.getMainComponentAsync();
+    if (!component || !component.componentPropertyDefinitions) {
+      throw new Error(`Component property definitions not available for ${nodeId}`);
     }
+
+    const propDef = component.componentPropertyDefinitions[propertyName];
+    if (!propDef) {
+      const availableProps = Object.keys(component.componentPropertyDefinitions);
+      throw new Error(`Property "${propertyName}" not found. Available properties: ${availableProps.join(', ')}`);
+    }
+
+    console.log(`[COMPONENT_PROP] Found property definition:`, {
+      name: propertyName,
+      type: propDef.type,
+      defaultValue: propDef.defaultValue
+    });
+
+    // Use setProperties API with correct property name format
+    const propertyUpdate = {};
+    
+    // For different property types, format the key differently
+    if (propDef.type === 'VARIANT') {
+      // VARIANT properties use direct property name
+      propertyUpdate[propertyName] = value;
+    } else if (propDef.type === 'TEXT' || propDef.type === 'BOOLEAN' || propDef.type === 'INSTANCE_SWAP') {
+      // TEXT, BOOLEAN, and INSTANCE_SWAP properties need the ID suffix
+      // Get the property ID from the node's componentProperties
+      const currentProps = node.componentProperties || {};
+      const propertyKey = Object.keys(currentProps).find(key => 
+        key.startsWith(propertyName + '#') || key === propertyName
+      );
+      
+      if (propertyKey) {
+        propertyUpdate[propertyKey] = value;
+      } else {
+        // Fallback: try with just the property name
+        propertyUpdate[propertyName] = value;
+      }
+    } else {
+      // Default case: use property name as-is
+      propertyUpdate[propertyName] = value;
+    }
+
+    console.log(`[COMPONENT_PROP] Setting properties:`, propertyUpdate);
+    node.setProperties(propertyUpdate);
+    
+    console.log(`[COMPONENT_PROP] Successfully set property using setProperties`);
 
     return {
       nodeId: nodeId,
       propertyName: propertyName,
       value: value,
+      propertyType: propDef.type,
       success: true
     };
 
