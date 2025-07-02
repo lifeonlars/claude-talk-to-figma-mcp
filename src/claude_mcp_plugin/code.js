@@ -192,6 +192,8 @@ async function handleCommand(command, params) {
       return await loadFontAsyncWrapper(params);
     case 'get_remote_components':
       return await getRemoteComponents(params);
+    case 'get_team_library_analysis':
+      return await getTeamLibraryAnalysis(params);
     case 'set_effects':
       return await setEffects(params);
     case 'set_effect_style_id':
@@ -1349,24 +1351,39 @@ async function searchComponents(params) {
   console.log(`[SEARCH_COMPONENTS] Searching for components matching: "${searchTerm}"`);
 
   try {
-    // Search efficiently - start with current page, then expand if needed
-    console.log(`[SEARCH_COMPONENTS] Searching current page first...`);
-    let foundComponents = [];
+    // Load all pages for comprehensive search
+    await figma.loadAllPagesAsync();
     
-    // Search current page components
-    const currentPageComponents = figma.currentPage.findAll(node => 
-      node.type === 'COMPONENT' && 
-      node.name.toLowerCase().includes(searchTerm.toLowerCase())
+    // Use findAllWithCriteria for better performance and coverage
+    console.log(`[SEARCH_COMPONENTS] Using comprehensive search across all pages...`);
+    
+    // Find all components that match the search term
+    const allComponents = figma.root.findAllWithCriteria({
+      types: ['COMPONENT'],
+    }).filter(component => 
+      component.name.toLowerCase().includes(searchTerm.toLowerCase())
     );
     
-    // Search current page instances to find imported components
-    const currentPageInstances = figma.currentPage.findAll(node => 
-      node.type === 'INSTANCE' && 
-      node.name.toLowerCase().includes(searchTerm.toLowerCase())
+    // Find all component sets that match
+    const componentSets = figma.root.findAllWithCriteria({
+      types: ['COMPONENT_SET'],
+    }).filter(componentSet => 
+      componentSet.name.toLowerCase().includes(searchTerm.toLowerCase())
     );
     
-    // Add current page results
-    currentPageComponents.forEach(comp => {
+    // Find instances that match to discover team library components
+    const matchingInstances = figma.root.findAllWithCriteria({
+      types: ['INSTANCE'],
+    }).filter(instance => 
+      instance.name.toLowerCase().includes(searchTerm.toLowerCase())
+    );
+    
+    console.log(`[SEARCH_COMPONENTS] Found ${allComponents.length} components, ${componentSets.length} component sets, ${matchingInstances.length} matching instances`);
+    
+    const foundComponents = [];
+    
+    // Add direct component matches
+    allComponents.forEach(comp => {
       if (comp.key) {
         foundComponents.push({
           key: comp.key,
@@ -1374,59 +1391,66 @@ async function searchComponents(params) {
           name: comp.name,
           description: comp.description || '',
           remote: comp.remote || false,
-          location: 'current_page'
+          type: comp.remote ? 'imported_component' : 'local_component',
+          location: comp.parent && comp.parent.type === 'PAGE' ? comp.parent.name : 'unknown'
         });
       }
     });
     
-    // Add component info from instances
-    currentPageInstances.forEach(instance => {
+    // Add components from matching component sets
+    componentSets.forEach(componentSet => {
+      componentSet.children.forEach(component => {
+        if (component.type === 'COMPONENT' && component.key) {
+          foundComponents.push({
+            key: component.key,
+            id: component.id,
+            name: component.name,
+            description: component.description || '',
+            remote: component.remote || false,
+            type: component.remote ? 'imported_variant' : 'local_variant',
+            variantSet: componentSet.name,
+            location: 'variant_set'
+          });
+        }
+      });
+    });
+    
+    // Add team library components discovered from instances using proper async method
+    console.log(`[SEARCH_COMPONENTS] Analyzing ${matchingInstances.length} matching instances for team library components...`);
+    
+    const instancePromises = matchingInstances.map(async (instance) => {
       try {
-        const mainComponent = figma.getNodeById(instance.componentId);
-        if (mainComponent && mainComponent.type === 'COMPONENT' && mainComponent.key) {
+        const mainComponent = await instance.getMainComponentAsync();
+        if (mainComponent && mainComponent.key) {
+          // Check if we already have this component
           const existing = foundComponents.find(c => c.key === mainComponent.key);
           if (!existing) {
-            foundComponents.push({
+            return {
               key: mainComponent.key,
               id: mainComponent.id,
               name: mainComponent.name,
               description: mainComponent.description || '',
               remote: mainComponent.remote || false,
-              location: 'imported',
-              instancesFound: 1
-            });
+              type: mainComponent.remote ? 'team_library_component' : 'local_component_from_instance',
+              instanceCount: 1,
+              discoveredFromInstance: true,
+              location: mainComponent.remote ? 'team_library' : 'local_document'
+            };
           }
         }
       } catch (error) {
-        // Skip unresolvable components
+        console.log(`[SEARCH_COMPONENTS] Could not resolve component for instance ${instance.id}: ${error.message}`);
       }
+      return null;
     });
     
-    // If we haven't found enough results and limit allows, search other pages
-    if (foundComponents.length < Math.min(limit, 20)) {
-      console.log(`[SEARCH_COMPONENTS] Expanding search to all pages...`);
-      await figma.loadAllPagesAsync();
-      
-      // Search all other pages
-      const allComponents = figma.root.findAll(node => 
-        node.type === 'COMPONENT' && 
-        node.name.toLowerCase().includes(searchTerm.toLowerCase()) &&
-        !foundComponents.some(fc => fc.id === node.id) // Avoid duplicates
-      );
-      
-      allComponents.forEach(comp => {
-        if (comp.key && foundComponents.length < limit) {
-          foundComponents.push({
-            key: comp.key,
-            id: comp.id,
-            name: comp.name,
-            description: comp.description || '',
-            remote: comp.remote || false,
-            location: 'other_page'
-          });
-        }
-      });
-    }
+    const instanceComponents = await Promise.all(instancePromises);
+    const validInstanceComponents = instanceComponents.filter(comp => comp !== null);
+    
+    // Add to found components
+    foundComponents.push(...validInstanceComponents);
+    
+    console.log(`[SEARCH_COMPONENTS] Added ${validInstanceComponents.length} components discovered from instances`);
     
     // Sort by relevance (exact matches first, then alphabetical)
     foundComponents.sort((a, b) => {
@@ -3036,30 +3060,35 @@ async function loadFontAsyncWrapper(params) {
 
 async function getRemoteComponents() {
   try {
-    console.log('[REMOTE_COMPONENTS] Starting component discovery...');
-    
-    // CRITICAL FIX: figma.teamLibrary.getAvailableComponentsAsync() doesn't exist!
-    // Instead, we need to get components from the current document
-    // and any imported components that are already in the document
+    console.log('[REMOTE_COMPONENTS] Starting comprehensive component discovery...');
     
     // Load all pages to ensure we can search the entire document
     console.log('[REMOTE_COMPONENTS] Loading all pages...');
     await figma.loadAllPagesAsync();
     
-    console.log('[REMOTE_COMPONENTS] Searching all pages for components and component instances...');
+    console.log('[REMOTE_COMPONENTS] Searching using findAllWithCriteria for better performance...');
     
-    // Find all components in the current document
-    const localComponents = figma.root.findAll(node => node.type === 'COMPONENT');
+    // Use the more efficient findAllWithCriteria method
+    const localComponents = figma.root.findAllWithCriteria({
+      types: ['COMPONENT'],
+    });
     
-    // Find all component instances to discover imported components
-    const instances = figma.root.findAll(node => node.type === 'INSTANCE');
+    // Find all component instances
+    const instances = figma.root.findAllWithCriteria({
+      types: ['INSTANCE'],
+    });
     
-    console.log(`[REMOTE_COMPONENTS] Found ${localComponents.length} local components and ${instances.length} instances`);
+    // Find component sets as well
+    const componentSets = figma.root.findAllWithCriteria({
+      types: ['COMPONENT_SET'],
+    });
     
-    // Create a map to track unique components
+    console.log(`[REMOTE_COMPONENTS] Found ${localComponents.length} components, ${instances.length} instances, ${componentSets.length} component sets`);
+    
+    // Create a comprehensive map to track unique components
     const componentMap = new Map();
     
-    // Add local components
+    // Add local components (including those in document)
     localComponents.forEach(component => {
       if (component.key) {
         componentMap.set(component.key, {
@@ -3068,54 +3097,223 @@ async function getRemoteComponents() {
           name: component.name,
           description: component.description || '',
           remote: component.remote || false,
-          type: 'component',
-          parent: component.parent ? component.parent.name : null
+          type: component.remote ? 'imported_component' : 'local_component',
+          parent: component.parent ? component.parent.name : null,
+          page: component.parent && component.parent.type === 'PAGE' ? component.parent.name : 'unknown'
         });
       }
     });
     
-    // Add components discovered from instances (imported components)
-    const uniqueComponentIds = new Set();
-    instances.forEach(instance => {
-      if (instance.componentId && !uniqueComponentIds.has(instance.componentId)) {
-        uniqueComponentIds.add(instance.componentId);
-        
-        // Try to get the main component
-        try {
-          const mainComponent = figma.getNodeById(instance.componentId);
-          if (mainComponent && mainComponent.type === 'COMPONENT' && mainComponent.key) {
-            componentMap.set(mainComponent.key, {
-              key: mainComponent.key,
-              id: mainComponent.id,
-              name: mainComponent.name,
-              description: mainComponent.description || '',
-              remote: mainComponent.remote || false,
-              type: 'imported_component',
-              instanceCount: instances.filter(inst => inst.componentId === instance.componentId).length
-            });
-          }
-        } catch (error) {
-          console.log(`[REMOTE_COMPONENTS] Could not resolve component for instance ${instance.id}: ${error.message}`);
+    // Add components from component sets
+    componentSets.forEach(componentSet => {
+      componentSet.children.forEach(component => {
+        if (component.type === 'COMPONENT' && component.key) {
+          componentMap.set(component.key, {
+            key: component.key,
+            id: component.id,
+            name: component.name,
+            description: component.description || '',
+            remote: component.remote || false,
+            type: component.remote ? 'imported_variant' : 'local_variant',
+            parent: componentSet.name,
+            variantSet: componentSet.name
+          });
         }
+      });
+    });
+    
+    // Add components discovered from instances (team library components in use)
+    console.log(`[REMOTE_COMPONENTS] Analyzing ${instances.length} instances for team library components...`);
+    
+    const instanceAnalysisPromises = instances.map(async (instance) => {
+      try {
+        // Use getMainComponentAsync for proper team library access
+        const mainComponent = await instance.getMainComponentAsync();
+        if (mainComponent && mainComponent.key) {
+          const instanceInfo = {
+            instanceId: instance.id,
+            instanceName: instance.name,
+            componentKey: mainComponent.key,
+            componentId: mainComponent.id,
+            componentName: mainComponent.name,
+            isRemote: mainComponent.remote || false,
+            description: mainComponent.description || ''
+          };
+          
+          console.log(`[REMOTE_COMPONENTS] Found component: ${mainComponent.name} (remote: ${mainComponent.remote})`);
+          return instanceInfo;
+        }
+      } catch (error) {
+        console.log(`[REMOTE_COMPONENTS] Could not resolve component for instance ${instance.id}: ${error.message}`);
+      }
+      return null;
+    });
+    
+    // Wait for all instance analysis to complete
+    const instanceResults = await Promise.all(instanceAnalysisPromises);
+    const validInstanceResults = instanceResults.filter(result => result !== null);
+    
+    console.log(`[REMOTE_COMPONENTS] Successfully analyzed ${validInstanceResults.length} instances`);
+    
+    // Group by component key to count instances and avoid duplicates
+    const componentFromInstancesMap = new Map();
+    validInstanceResults.forEach(instanceInfo => {
+      if (!componentFromInstancesMap.has(instanceInfo.componentKey)) {
+        componentFromInstancesMap.set(instanceInfo.componentKey, {
+          key: instanceInfo.componentKey,
+          id: instanceInfo.componentId,
+          name: instanceInfo.componentName,
+          description: instanceInfo.description,
+          remote: instanceInfo.isRemote,
+          type: instanceInfo.isRemote ? 'team_library_component' : 'local_component_from_instance',
+          instanceCount: 1,
+          instances: [{ id: instanceInfo.instanceId, name: instanceInfo.instanceName }]
+        });
+      } else {
+        const existing = componentFromInstancesMap.get(instanceInfo.componentKey);
+        existing.instanceCount++;
+        existing.instances.push({ id: instanceInfo.instanceId, name: instanceInfo.instanceName });
+      }
+    });
+    
+    // Add these components to the main map, but don't overwrite local components
+    componentFromInstancesMap.forEach((componentInfo, key) => {
+      if (!componentMap.has(key)) {
+        componentMap.set(key, componentInfo);
+      } else {
+        // Update instance count for existing components
+        const existing = componentMap.get(key);
+        existing.instanceCount = (existing.instanceCount || 0) + componentInfo.instanceCount;
+        existing.instances = componentInfo.instances;
       }
     });
     
     const allComponents = Array.from(componentMap.values());
     
+    // Organize by type for better reporting
+    const byType = {
+      local_component: allComponents.filter(c => c.type === 'local_component').length,
+      local_variant: allComponents.filter(c => c.type === 'local_variant').length,
+      imported_component: allComponents.filter(c => c.type === 'imported_component').length,
+      imported_variant: allComponents.filter(c => c.type === 'imported_variant').length,
+      team_library_component: allComponents.filter(c => c.type === 'team_library_component').length
+    };
+    
+    console.log(`[REMOTE_COMPONENTS] Component breakdown:`, byType);
     console.log(`[REMOTE_COMPONENTS] Total unique components found: ${allComponents.length}`);
     
     return {
       success: true,
-      source: 'document_scan',
+      source: 'comprehensive_scan',
       count: allComponents.length,
-      localComponents: localComponents.length,
-      importedComponents: allComponents.filter(c => c.type === 'imported_component').length,
+      breakdown: byType,
       components: allComponents.sort((a, b) => a.name.localeCompare(b.name))
     };
     
   } catch (error) {
     console.error('[REMOTE_COMPONENTS] Error getting components:', error);
     throw new Error(`Error getting components: ${error.message}`);
+  }
+}
+
+// Get Team Library Analysis
+async function getTeamLibraryAnalysis() {
+  try {
+    console.log('[TEAM_LIBRARY_ANALYSIS] Starting team library component analysis...');
+    
+    // Load all pages to ensure complete analysis
+    await figma.loadAllPagesAsync();
+    
+    // Find all instances to analyze their source components
+    const allInstances = figma.root.findAllWithCriteria({
+      types: ['INSTANCE'],
+    });
+    
+    console.log(`[TEAM_LIBRARY_ANALYSIS] Found ${allInstances.length} instances to analyze`);
+    
+    const libraryMap = new Map();
+    const analysisPromises = allInstances.map(async (instance) => {
+      try {
+        const mainComponent = await instance.getMainComponentAsync();
+        if (mainComponent && mainComponent.key) {
+          const isRemote = mainComponent.remote || false;
+          const libraryKey = isRemote ? `team_library_${mainComponent.key.split(':')[0]}` : 'local_document';
+          
+          if (!libraryMap.has(libraryKey)) {
+            libraryMap.set(libraryKey, {
+              libraryType: isRemote ? 'team_library' : 'local_document',
+              components: new Map(),
+              totalInstances: 0
+            });
+          }
+          
+          const library = libraryMap.get(libraryKey);
+          library.totalInstances++;
+          
+          if (!library.components.has(mainComponent.key)) {
+            library.components.set(mainComponent.key, {
+              key: mainComponent.key,
+              id: mainComponent.id,
+              name: mainComponent.name,
+              description: mainComponent.description || '',
+              remote: isRemote,
+              instanceCount: 1,
+              sampleInstance: {
+                id: instance.id,
+                name: instance.name,
+                page: instance.parent && instance.parent.type === 'PAGE' ? instance.parent.name : 'unknown'
+              }
+            });
+          } else {
+            library.components.get(mainComponent.key).instanceCount++;
+          }
+        }
+      } catch (error) {
+        console.log(`[TEAM_LIBRARY_ANALYSIS] Could not analyze instance ${instance.id}: ${error.message}`);
+      }
+    });
+    
+    await Promise.all(analysisPromises);
+    
+    // Convert to result format
+    const libraries = [];
+    libraryMap.forEach((library, libraryKey) => {
+      libraries.push({
+        libraryId: libraryKey,
+        type: library.libraryType,
+        componentCount: library.components.size,
+        totalInstances: library.totalInstances,
+        components: Array.from(library.components.values()).sort((a, b) => a.name.localeCompare(b.name))
+      });
+    });
+    
+    // Sort libraries by component count
+    libraries.sort((a, b) => b.componentCount - a.componentCount);
+    
+    const summary = {
+      totalLibraries: libraries.length,
+      totalUniqueComponents: libraries.reduce((sum, lib) => sum + lib.componentCount, 0),
+      totalInstances: libraries.reduce((sum, lib) => sum + lib.totalInstances, 0),
+      teamLibraries: libraries.filter(lib => lib.type === 'team_library').length,
+      localComponents: libraries.filter(lib => lib.type === 'local_document').length
+    };
+    
+    console.log(`[TEAM_LIBRARY_ANALYSIS] Analysis complete:`, summary);
+    
+    return {
+      success: true,
+      summary,
+      libraries,
+      apiLimitations: {
+        note: 'Figma Plugin API cannot browse team library catalogs directly',
+        explanation: 'Components are discovered only through existing instances in the document',
+        recommendation: 'To access more components, create instances of desired components first'
+      }
+    };
+    
+  } catch (error) {
+    console.error('[TEAM_LIBRARY_ANALYSIS] Error analyzing team libraries:', error);
+    throw new Error(`Error analyzing team libraries: ${error.message}`);
   }
 }
 

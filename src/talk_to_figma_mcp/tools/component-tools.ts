@@ -258,4 +258,34 @@ export function registerComponentTools(server: McpServer): void {
       }
     }
   );
+
+  // Team Library Analysis Tool
+  server.tool(
+    "get_team_library_analysis",
+    "Analyze team library usage and discover available components through existing instances",
+    {},
+    async () => {
+      try {
+        const result = await sendCommandToFigma("get_team_library_analysis", {}, 15000);
+        const typedResult = result as any;
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(typedResult, null, 2),
+            }
+          ]
+        }
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error analyzing team libraries: ${error instanceof Error ? error.message : String(error)}`,
+            },
+          ],
+        };
+      }
+    }
+  );
 }
